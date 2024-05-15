@@ -2,6 +2,7 @@
 
 ## Technologies
 
+- Python 3.11
 - API: FastAPI
 - ML: transformer, torch
 - Distributed task queue: Celery
