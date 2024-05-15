@@ -1,0 +1,29 @@
+from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
+
+from config import app_settings
+from dto import DatasetProcessInfo
+
+app = FastAPI(
+    title='API for Machine Code Detection System',
+)
+
+# Set all CORS enabled origins
+if app_settings.BACKEND_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            str(origin).strip("/") for origin in app_settings.BACKEND_CORS_ORIGINS
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+@app.post("/dataset/process")
+async def process_dataset(datasetInfo: DatasetProcessInfo):
+    print("File path: ", datasetInfo.folder_path)
+    print("Dataset ID: ", datasetInfo.dataset_id)
+    print("File list: ", datasetInfo.file_list)
+    return {"message": "ok"}

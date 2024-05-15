@@ -1,0 +1,130 @@
+import json
+import uuid
+import zipfile
+from contextlib import asynccontextmanager
+from io import BytesIO
+from typing import List
+
+import httpx
+from fastapi import FastAPI, UploadFile, HTTPException
+from sqlmodel import select
+from starlette.background import BackgroundTask
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+
+from api import api_router
+from config import app_settings, DbSessionDeps
+from celery_task import celery_machine_code_detection_task
+from persistence import ReportFile
+
+from dto import DatasetProcessInfo
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialise the Client on startup and add it to the state
+    # http://127.0.0.1:8001/ is the base_url of the other server that requests should be forwarded to
+    async with httpx.AsyncClient(base_url='http://127.0.0.1:3000/') as client:
+        yield {'client': client}
+        # The Client closes on shutdown
+
+
+app = FastAPI(
+    title='API for Machine Code Detection System',
+    lifespan=lifespan
+)
+
+# Set all CORS enabled origins
+if app_settings.BACKEND_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            str(origin).strip("/") for origin in app_settings.BACKEND_CORS_ORIGINS
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+app.include_router(api_router, prefix=app_settings.API_PREFIX)
+
+
+@app.post("/reports")
+async def _reverse_proxy(request: Request):
+    client: httpx.AsyncClient = request.state.client
+    url = httpx.URL(path=request.url.path, query=request.url.query.encode('utf-8'))
+    req = client.build_request(
+        request.method, url, headers=request.headers.raw, content=await request.body()
+    )
+
+    r = await client.send(req, stream=False)
+    response_content = r.read()
+
+    response = Response(
+        content=response_content,
+        status_code=r.status_code,
+        headers=r.headers,
+        background=BackgroundTask(r.aclose)
+    )
+
+    if r.status_code != 201:
+        return response
+
+    form_data = await request.form()
+    uploaded_file: UploadFile = form_data.get("dataset[zipfile]")
+    contents = await uploaded_file.read()
+    iob = BytesIO(contents)
+    zip_data = zipfile.ZipFile(iob)
+    zip_infos = zip_data.infolist()
+
+    # iterate through each file
+    filename_list = []
+    for zip_info in zip_infos:
+        if not zip_info.is_dir():
+            filename_list.append(zip_info.filename)
+            print(zip_info.filename)
+
+    new_dir = str(uuid.uuid4())
+    print("dir ", new_dir)
+    zip_data.extractall(f"files/{new_dir}")
+
+    response_content_json = json.loads(response_content)
+    report_id = response_content_json['id']
+    print("report id ", report_id)
+
+    data = {
+        "report_id": report_id,
+        "path": f"files/{new_dir}",
+        "filename_list": filename_list
+    }
+    task = celery_machine_code_detection_task.delay(data)
+    print("task id ", task.id)
+
+    return response
+
+
+@app.get("/reports/{report_id}", response_model=List[ReportFile])
+async def get_report(report_id: int, db_session: DbSessionDeps):
+    # return db_session.get(ReportFile, report_id)
+    return db_session.exec(select(ReportFile).where(ReportFile.report_id == report_id)).all()
+
+
+@app.get("/reports/{report_id}/{filename}", response_model=ReportFile)
+async def get_report_file(report_id: int, filename: str, db_session: DbSessionDeps):
+    report_file = db_session.exec(
+                    select(ReportFile)
+                    .where(ReportFile.report_id == report_id)
+                    .where(ReportFile.filename == filename)).first()
+    # report_file = db_session.get(ReportFile, {"report_id": report_id, "filename": filename})
+    if not report_file:
+        raise HTTPException(status_code=400, detail={"msg": "not found"})
+
+    return report_file
+
+
+@app.post("/dataset/process")
+async def process_dataset(datasetInfo: DatasetProcessInfo):
+    print("File path: ", datasetInfo.folder_path)
+    print("Dataset ID: ", datasetInfo.dataset_id)
+
+    return {"message": "ok"}

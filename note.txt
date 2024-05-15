@@ -1,0 +1,3 @@
+celery machine code detection: celery -A celery_task.machine_code_detection worker
+celery inference: celery -A celery_task.inference worker -Q inference --pool=threads --loglevel=DEBUG
+api: uvicorn main:app
